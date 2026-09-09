@@ -404,6 +404,8 @@ void CheckDbgUiRemoteBreakin()
     if (std::memcmp(current.data(), g_baseline.data(), current.size()) == 0)
     {
         g_haveLastObserved = false;
+        g_haveLastNeutralizedTarget = false;
+        g_lastNeutralizedTarget = 0;
         return;
     }
 
@@ -533,6 +535,11 @@ bool Initialize()
     }
 
     g_haveLastObserved = false;
+    g_haveLastNeutralizedTarget = false;
+    g_lastNeutralizedTarget = 0;
+
+    CheckDbgUiRemoteBreakin();
+
     try
     {
         std::thread(WatchLoop).detach();

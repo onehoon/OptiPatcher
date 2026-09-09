@@ -68,7 +68,7 @@ std::string CurrentExeName()
 bool IsSupportedExecutable(const std::string& exeName)
 {
     return exeName == "monsterhunterwilds.exe" || exeName == "dd2.exe" || exeName == "re9.exe" ||
-           exeName == "pragmata.exe";
+           exeName == "pragmata.exe" || exeName == "onimushawots.exe";
 }
 
 bool HasUnsupportedProtectionFlags(DWORD protection)

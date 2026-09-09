@@ -42,7 +42,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OptiPatcher-${{ steps.buildtime.outputs.timestamp }}
-          path: ${{ github.workspace }}/x64/Release/OptiPatcher.asi
+          path: |
+            ${{ github.workspace }}/x64/Release/OptiPatcher.asi
+            ${{ github.workspace }}/THIRD_PARTY_NOTICES.md
           if-no-files-found: error
 
       - name: Generate Rolling Release notes
@@ -84,6 +86,8 @@ jobs:
           allowUpdates: true
           makeLatest: true
           replacesArtifacts: true
-          artifacts: ${{ github.workspace }}/x64/Release/OptiPatcher.asi
+          artifacts: >-
+            ${{ github.workspace }}/x64/Release/OptiPatcher.asi,
+            ${{ github.workspace }}/THIRD_PARTY_NOTICES.md
           bodyFile: release-notes.md
           token: ${{ secrets.GITHUB_TOKEN }}

@@ -274,21 +274,9 @@ bool QueryPrivateExecutableTarget(uintptr_t target, MEMORY_BASIC_INFORMATION& in
 
 bool BaselineLooksAlreadyHooked(const std::array<BYTE, kBaselineSize>& candidate)
 {
-    const bool recognizedHook = candidate[0] == 0xe9 || (candidate[0] == 0xff && candidate[1] == 0x25);
-    if (!recognizedHook)
-    {
-        return false;
-    }
-
-    HookInfo hook{};
-    if (!ResolveHook(candidate, hook))
-    {
-        // A recognized redirect that cannot be resolved is not a safe baseline.
-        return true;
-    }
-
-    MEMORY_BASIC_INFORMATION targetInformation{};
-    return QueryPrivateExecutableTarget(hook.target, targetInformation);
+    // Never trust a live baseline that already contains a redirect handled by this watcher.
+    // The destination may still be under construction or may belong to another component.
+    return candidate[0] == 0xe9 || (candidate[0] == 0xff && candidate[1] == 0x25);
 }
 
 bool SameRegion(const MEMORY_BASIC_INFORMATION& expected, const MEMORY_BASIC_INFORMATION& current)

@@ -26,11 +26,11 @@ struct HookInfo
     SIZE_T length = 0;
     uintptr_t target = 0;
     std::array<BYTE, 6> bytes{};
+    std::array<BYTE, kBaselineSize> observedEntry{};
     const char* type = nullptr;
 };
 
 std::atomic<bool> g_started = false;
-std::atomic<bool> g_stopRequested = false;
 std::mutex g_lifecycleMutex;
 void* g_dbgUiRemoteBreakin = nullptr;
 std::array<BYTE, kBaselineSize> g_baseline{};
@@ -122,7 +122,7 @@ bool QueryRange(const void* address, SIZE_T size, bool requireReadable, MEMORY_B
     }
 
     const uintptr_t start = reinterpret_cast<uintptr_t>(address);
-    if (size - 1 > UINTPTR_MAX - start)
+    if (size > UINTPTR_MAX - start)
     {
         return false;
     }
@@ -133,7 +133,7 @@ bool QueryRange(const void* address, SIZE_T size, bool requireReadable, MEMORY_B
     }
 
     const uintptr_t regionStart = reinterpret_cast<uintptr_t>(information.BaseAddress);
-    if (information.RegionSize == 0 || information.RegionSize - 1 > UINTPTR_MAX - regionStart)
+    if (information.RegionSize == 0 || information.RegionSize > UINTPTR_MAX - regionStart)
     {
         return false;
     }
@@ -188,6 +188,7 @@ bool CalculateRelativeTarget(uintptr_t instruction, SIZE_T instructionLength, in
 
 bool ResolveHook(const std::array<BYTE, kBaselineSize>& current, HookInfo& hook)
 {
+    hook.observedEntry = current;
     const uintptr_t instruction = reinterpret_cast<uintptr_t>(g_dbgUiRemoteBreakin);
 
     if (current[0] == 0xe9)
@@ -234,6 +235,24 @@ bool ResolveHook(const std::array<BYTE, kBaselineSize>& current, HookInfo& hook)
     }
 
     return false;
+}
+
+bool RevalidateHook(const HookInfo& expected, HookInfo& current)
+{
+    std::array<BYTE, kBaselineSize> now{};
+    if (!ReadBytes(g_dbgUiRemoteBreakin, now.data(), now.size()) ||
+        std::memcmp(now.data(), expected.observedEntry.data(), now.size()) != 0)
+    {
+        return false;
+    }
+
+    if (!ResolveHook(now, current))
+    {
+        return false;
+    }
+
+    return current.length == expected.length && current.target == expected.target &&
+           std::memcmp(current.bytes.data(), expected.bytes.data(), expected.length) == 0;
 }
 
 bool QueryPrivateExecutableTarget(uintptr_t target, MEMORY_BASIC_INFORMATION& information)
@@ -315,9 +334,9 @@ bool NeutralizePayload(const MEMORY_BASIC_INFORMATION& expected, bool logDetails
 
 bool RestoreEntry(const HookInfo& hook)
 {
-    std::array<BYTE, 6> current{};
-    if (!ReadBytes(g_dbgUiRemoteBreakin, current.data(), hook.length) ||
-        std::memcmp(current.data(), hook.bytes.data(), hook.length) != 0)
+    std::array<BYTE, kBaselineSize> current{};
+    if (!ReadBytes(g_dbgUiRemoteBreakin, current.data(), current.size()) ||
+        std::memcmp(current.data(), hook.observedEntry.data(), current.size()) != 0)
     {
         Log("[CapcomAntiDebug] DbgUiRemoteBreakin changed before restore; leaving it untouched");
         return false;
@@ -396,13 +415,25 @@ void CheckDbgUiRemoteBreakin()
         return;
     }
 
+    HookInfo validatedHook{};
+    if (!RevalidateHook(hook, validatedHook))
+    {
+        if (newlyObserved)
+        {
+            Log("[CapcomAntiDebug] hook changed before neutralization; retrying later");
+        }
+        return;
+    }
+
     if (newlyObserved)
     {
-        Log("[CapcomAntiDebug] hook type=%s target=%p", hook.type, reinterpret_cast<void*>(hook.target));
+        Log("[CapcomAntiDebug] hook type=%s target=%p",
+            validatedHook.type,
+            reinterpret_cast<void*>(validatedHook.target));
     }
 
     MEMORY_BASIC_INFORMATION targetInformation{};
-    if (!QueryPrivateExecutableTarget(hook.target, targetInformation))
+    if (!QueryPrivateExecutableTarget(validatedHook.target, targetInformation))
     {
         if (newlyObserved)
         {
@@ -421,7 +452,7 @@ void CheckDbgUiRemoteBreakin()
 
     if (NeutralizePayload(targetInformation, newlyObserved))
     {
-        if (RestoreEntry(hook))
+        if (RestoreEntry(validatedHook))
         {
             g_haveLastObserved = false;
         }
@@ -430,7 +461,7 @@ void CheckDbgUiRemoteBreakin()
 
 void WatchLoop()
 {
-    while (!g_stopRequested.load())
+    while (true)
     {
         CheckDbgUiRemoteBreakin();
         Sleep(500);
@@ -489,7 +520,6 @@ bool Initialize()
         return false;
     }
 
-    g_stopRequested.store(false);
     g_haveLastObserved = false;
     try
     {
@@ -506,8 +536,4 @@ bool Initialize()
     return true;
 }
 
-void Shutdown()
-{
-    g_stopRequested.store(true);
-}
 } // namespace capcom_antidebug

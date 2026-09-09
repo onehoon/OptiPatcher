@@ -16,6 +16,11 @@
 #include <string>
 #include <thread>
 
+// The DbgUiRemoteBreakin anti-debug handling in this module is adapted from
+// REFramework's IntegrityCheckBypass::anti_debug_watcher() behavior.
+// REFramework: Copyright (c) 2019 praydog, MIT License.
+// See THIRD_PARTY_NOTICES.md for the applicable notice.
+
 namespace
 {
 constexpr SIZE_T kBaselineSize = 32;
@@ -265,6 +270,25 @@ bool QueryPrivateExecutableTarget(uintptr_t target, MEMORY_BASIC_INFORMATION& in
     }
 
     return information.Type == MEM_PRIVATE && IsExecutableProtection(information.Protect);
+}
+
+bool BaselineLooksAlreadyHooked(const std::array<BYTE, kBaselineSize>& candidate)
+{
+    const bool recognizedHook = candidate[0] == 0xe9 || (candidate[0] == 0xff && candidate[1] == 0x25);
+    if (!recognizedHook)
+    {
+        return false;
+    }
+
+    HookInfo hook{};
+    if (!ResolveHook(candidate, hook))
+    {
+        // A recognized redirect that cannot be resolved is not a safe baseline.
+        return true;
+    }
+
+    MEMORY_BASIC_INFORMATION targetInformation{};
+    return QueryPrivateExecutableTarget(hook.target, targetInformation);
 }
 
 bool SameRegion(const MEMORY_BASIC_INFORMATION& expected, const MEMORY_BASIC_INFORMATION& current)
@@ -518,6 +542,13 @@ bool Initialize()
         !ReadBytes(g_dbgUiRemoteBreakin, g_baseline.data(), g_baseline.size()))
     {
         Log("[CapcomAntiDebug] failed to locate or capture DbgUiRemoteBreakin");
+        g_dbgUiRemoteBreakin = nullptr;
+        return false;
+    }
+
+    if (BaselineLooksAlreadyHooked(g_baseline))
+    {
+        Log("[CapcomAntiDebug] DbgUiRemoteBreakin was already redirected before baseline capture; refusing contaminated baseline");
         g_dbgUiRemoteBreakin = nullptr;
         return false;
     }

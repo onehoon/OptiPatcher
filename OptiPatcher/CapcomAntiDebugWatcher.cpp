@@ -246,25 +246,46 @@ bool QueryPrivateExecutableTarget(uintptr_t target, MEMORY_BASIC_INFORMATION& in
     return information.Type == MEM_PRIVATE && IsExecutableProtection(information.Protect);
 }
 
-bool NeutralizePayload(const MEMORY_BASIC_INFORMATION& information)
+bool SameRegion(const MEMORY_BASIC_INFORMATION& expected, const MEMORY_BASIC_INFORMATION& current)
 {
-    if (information.BaseAddress == nullptr || information.RegionSize == 0 || information.Type != MEM_PRIVATE ||
-        !IsExecutableProtection(information.Protect))
+    return current.BaseAddress == expected.BaseAddress && current.AllocationBase == expected.AllocationBase &&
+           current.RegionSize == expected.RegionSize && current.State == MEM_COMMIT &&
+           current.Type == MEM_PRIVATE && IsExecutableProtection(current.Protect);
+}
+
+bool NeutralizePayload(const MEMORY_BASIC_INFORMATION& expected, bool logDetails)
+{
+    if (expected.BaseAddress == nullptr || expected.RegionSize == 0 || expected.State != MEM_COMMIT ||
+        expected.Type != MEM_PRIVATE || !IsExecutableProtection(expected.Protect))
     {
         return false;
     }
 
-    DWORD oldProtection = 0;
-    if (!VirtualProtect(information.BaseAddress, information.RegionSize, PAGE_EXECUTE_READWRITE, &oldProtection))
+    MEMORY_BASIC_INFORMATION current{};
+    if (VirtualQuery(expected.BaseAddress, &current, sizeof(current)) != sizeof(current) ||
+        !SameRegion(expected, current))
     {
-        Log("[CapcomAntiDebug] failed to change memory protection");
+        if (logDetails)
+        {
+            Log("[CapcomAntiDebug] target region changed before neutralization; retrying later");
+        }
+        return false;
+    }
+
+    DWORD oldProtection = 0;
+    if (!VirtualProtect(current.BaseAddress, current.RegionSize, PAGE_EXECUTE_READWRITE, &oldProtection))
+    {
+        if (logDetails)
+        {
+            Log("[CapcomAntiDebug] failed to change memory protection");
+        }
         return false;
     }
 
     bool wrote = true;
     __try
     {
-        std::memset(information.BaseAddress, 0xc3, information.RegionSize);
+        std::memset(current.BaseAddress, 0xc3, current.RegionSize);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
@@ -273,16 +294,22 @@ bool NeutralizePayload(const MEMORY_BASIC_INFORMATION& information)
 
     DWORD ignoredProtection = 0;
     const bool restoredProtection =
-        VirtualProtect(information.BaseAddress, information.RegionSize, oldProtection, &ignoredProtection) != FALSE;
-    const bool flushed = FlushInstructionCache(GetCurrentProcess(), information.BaseAddress, information.RegionSize) != FALSE;
+        VirtualProtect(current.BaseAddress, current.RegionSize, oldProtection, &ignoredProtection) != FALSE;
+    const bool flushed = FlushInstructionCache(GetCurrentProcess(), current.BaseAddress, current.RegionSize) != FALSE;
 
     if (!wrote || !restoredProtection || !flushed)
     {
-        Log("[CapcomAntiDebug] failed to neutralize executable private payload");
+        if (logDetails)
+        {
+            Log("[CapcomAntiDebug] failed to neutralize executable private payload");
+        }
         return false;
     }
 
-    Log("[CapcomAntiDebug] neutralized executable private payload");
+    if (logDetails)
+    {
+        Log("[CapcomAntiDebug] neutralized executable private payload");
+    }
     return true;
 }
 
@@ -359,7 +386,7 @@ void CheckDbgUiRemoteBreakin()
         Log("[CapcomAntiDebug] DbgUiRemoteBreakin modification detected");
     }
 
-    HookInfo hook;
+    HookInfo hook{};
     if (!ResolveHook(current, hook))
     {
         if (newlyObserved)
@@ -369,7 +396,10 @@ void CheckDbgUiRemoteBreakin()
         return;
     }
 
-    Log("[CapcomAntiDebug] hook type=%s target=%p", hook.type, reinterpret_cast<void*>(hook.target));
+    if (newlyObserved)
+    {
+        Log("[CapcomAntiDebug] hook type=%s target=%p", hook.type, reinterpret_cast<void*>(hook.target));
+    }
 
     MEMORY_BASIC_INFORMATION targetInformation{};
     if (!QueryPrivateExecutableTarget(hook.target, targetInformation))
@@ -389,7 +419,7 @@ void CheckDbgUiRemoteBreakin()
             targetInformation.Protect);
     }
 
-    if (NeutralizePayload(targetInformation))
+    if (NeutralizePayload(targetInformation, newlyObserved))
     {
         if (RestoreEntry(hook))
         {

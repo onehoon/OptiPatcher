@@ -36,6 +36,8 @@ void* g_dbgUiRemoteBreakin = nullptr;
 std::array<BYTE, kBaselineSize> g_baseline{};
 std::array<BYTE, kBaselineSize> g_lastObserved{};
 bool g_haveLastObserved = false;
+uintptr_t g_lastNeutralizedTarget = 0;
+bool g_haveLastNeutralizedTarget = false;
 
 void Log(const char* format, ...)
 {
@@ -272,17 +274,23 @@ bool SameRegion(const MEMORY_BASIC_INFORMATION& expected, const MEMORY_BASIC_INF
            current.Type == MEM_PRIVATE && IsExecutableProtection(current.Protect);
 }
 
-bool NeutralizePayload(const MEMORY_BASIC_INFORMATION& expected, bool logDetails)
+bool NeutralizePayload(const HookInfo& expectedHook,
+                       const MEMORY_BASIC_INFORMATION& expectedRegion,
+                       bool logDetails)
 {
-    if (expected.BaseAddress == nullptr || expected.RegionSize == 0 || expected.State != MEM_COMMIT ||
-        expected.Type != MEM_PRIVATE || !IsExecutableProtection(expected.Protect))
+    HookInfo currentHook{};
+    if (!RevalidateHook(expectedHook, currentHook) || currentHook.target != expectedHook.target)
     {
+        if (logDetails)
+        {
+            Log("[CapcomAntiDebug] hook changed before neutralization; retrying later");
+        }
         return false;
     }
 
-    MEMORY_BASIC_INFORMATION current{};
-    if (VirtualQuery(expected.BaseAddress, &current, sizeof(current)) != sizeof(current) ||
-        !SameRegion(expected, current))
+    MEMORY_BASIC_INFORMATION currentRegion{};
+    if (!QueryPrivateExecutableTarget(currentHook.target, currentRegion) ||
+        !SameRegion(expectedRegion, currentRegion))
     {
         if (logDetails)
         {
@@ -292,7 +300,7 @@ bool NeutralizePayload(const MEMORY_BASIC_INFORMATION& expected, bool logDetails
     }
 
     DWORD oldProtection = 0;
-    if (!VirtualProtect(current.BaseAddress, current.RegionSize, PAGE_EXECUTE_READWRITE, &oldProtection))
+    if (!VirtualProtect(currentRegion.BaseAddress, currentRegion.RegionSize, PAGE_EXECUTE_READWRITE, &oldProtection))
     {
         if (logDetails)
         {
@@ -304,7 +312,7 @@ bool NeutralizePayload(const MEMORY_BASIC_INFORMATION& expected, bool logDetails
     bool wrote = true;
     __try
     {
-        std::memset(current.BaseAddress, 0xc3, current.RegionSize);
+        std::memset(currentRegion.BaseAddress, 0xc3, currentRegion.RegionSize);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
@@ -313,8 +321,9 @@ bool NeutralizePayload(const MEMORY_BASIC_INFORMATION& expected, bool logDetails
 
     DWORD ignoredProtection = 0;
     const bool restoredProtection =
-        VirtualProtect(current.BaseAddress, current.RegionSize, oldProtection, &ignoredProtection) != FALSE;
-    const bool flushed = FlushInstructionCache(GetCurrentProcess(), current.BaseAddress, current.RegionSize) != FALSE;
+        VirtualProtect(currentRegion.BaseAddress, currentRegion.RegionSize, oldProtection, &ignoredProtection) != FALSE;
+    const bool flushed =
+        FlushInstructionCache(GetCurrentProcess(), currentRegion.BaseAddress, currentRegion.RegionSize) != FALSE;
 
     if (!wrote || !restoredProtection || !flushed)
     {
@@ -325,9 +334,11 @@ bool NeutralizePayload(const MEMORY_BASIC_INFORMATION& expected, bool logDetails
         return false;
     }
 
-    if (logDetails)
+    if (!g_haveLastNeutralizedTarget || g_lastNeutralizedTarget != expectedHook.target)
     {
         Log("[CapcomAntiDebug] neutralized executable private payload");
+        g_lastNeutralizedTarget = expectedHook.target;
+        g_haveLastNeutralizedTarget = true;
     }
     return true;
 }
@@ -450,11 +461,12 @@ void CheckDbgUiRemoteBreakin()
             targetInformation.Protect);
     }
 
-    if (NeutralizePayload(targetInformation, newlyObserved))
+    if (NeutralizePayload(validatedHook, targetInformation, newlyObserved))
     {
         if (RestoreEntry(validatedHook))
         {
             g_haveLastObserved = false;
+            g_haveLastNeutralizedTarget = false;
         }
     }
 }
